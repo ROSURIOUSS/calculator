@@ -78,7 +78,7 @@ class FicsitOpsApp:
         self.close_when_stopped = False
         self.form_widgets: list[tk.Widget] = []
 
-        root.title(f"{APP_NAME} — помощник по Satisfactory")
+        root.title(f"{APP_NAME} — внешний помощник")
         root.geometry("850x820")
         root.minsize(680, 650)
         root.configure(bg=self.BG)
@@ -100,6 +100,7 @@ class FicsitOpsApp:
             "api_base": self.api_base_var.get().strip(),
             "model": self.model_var.get().strip(),
             "max_steps": self.max_steps_var.get().strip(),
+            "watch_user_input": self.watch_user_input_var.get(),
             "goal": self.goal_text.get("1.0", "end-1c").strip(),
         }
         try:
@@ -129,6 +130,8 @@ class FicsitOpsApp:
         style.map("Stop.TButton", background=[("active", "#68352d"), ("disabled", "#35211e")])
         style.configure("TRadiobutton", background=self.PANEL, foreground=self.TEXT, font=("Segoe UI", 10))
         style.map("TRadiobutton", background=[("active", self.PANEL)], foreground=[("active", self.GREEN)])
+        style.configure("TCheckbutton", background=self.PANEL, foreground=self.TEXT, font=("Segoe UI", 10))
+        style.map("TCheckbutton", background=[("active", self.PANEL)], foreground=[("active", self.GREEN), ("disabled", self.MUTED)])
         style.configure("TEntry", fieldbackground=self.PANEL_DARK, foreground=self.TEXT, insertcolor=self.TEXT, padding=7)
         style.configure("TSpinbox", fieldbackground=self.PANEL_DARK, foreground=self.TEXT, padding=6)
 
@@ -196,6 +199,19 @@ class FicsitOpsApp:
         self.max_steps_spin.pack(side="left")
         self.form_widgets.append(self.max_steps_spin)
         self.form_widgets.extend(self.mode_buttons)
+        self.watch_user_input_var = tk.BooleanVar(value=False)
+        self.watch_user_input_check = ttk.Checkbutton(
+            options,
+            text="Передавать vision-модели мои клавиши и клики (только при активной Satisfactory)",
+            variable=self.watch_user_input_var,
+        )
+        self.watch_user_input_check.grid(row=2, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        self.form_widgets.append(self.watch_user_input_check)
+        ttk.Label(
+            options,
+            text="События не записываются в журнал. Отключай опцию перед вводом в игровой чат или секретов.",
+            style="PanelMuted.TLabel",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(3, 0))
         options.columnconfigure(0, weight=1)
         options.columnconfigure(1, weight=0)
 
@@ -232,7 +248,7 @@ class FicsitOpsApp:
         self.log_text.configure(yscrollcommand=log_scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         log_scroll.pack(side="right", fill="y")
-        ttk.Label(outer, text="F8 / Esc останавливают автопилот. В live-режиме оставайся рядом с компьютером.", style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Label(outer, text="F8 / Esc — аварийная остановка live-режима. В любом режиме используй кнопку «Остановить»; при live оставайся рядом.", style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
 
     def _field(self, parent: ttk.Frame, label: str, variable: tk.StringVar, *, row: int, column: int, width: int, show: str | None = None, allow_copy: bool = True, paste_button: bool = False) -> None:
         frame = ttk.Frame(parent, style="Panel.TFrame")
@@ -330,6 +346,7 @@ class FicsitOpsApp:
         self.model_var.set(str(self.settings.get("model", DEFAULT_MODEL)))
         self.api_key_var.set(os.getenv("VISION_API_KEY", ""))
         self.max_steps_var.set(str(self.settings.get("max_steps", "10")))
+        self.watch_user_input_var.set(bool(self.settings.get("watch_user_input", False)))
         self.goal_text.insert("1.0", str(self.settings.get("goal", default_goal)))
 
     def _update_mode_label(self) -> None:
@@ -359,10 +376,13 @@ class FicsitOpsApp:
 
         live = self.mode_var.get() == "live"
         if live:
+            confirmation_text = "Автопилот сможет нажимать клавиши и мышь в активном окне игры.\n\n"
+            if self.watch_user_input_var.get():
+                confirmation_text += "События клавиатуры и кнопок мыши в игре будут передаваться выбранной vision-модели для контекста.\n\n"
+            confirmation_text += "Сначала сохранись, открой Satisfactory и оставайся рядом. Продолжить?"
             confirmed = messagebox.askyesno(
                 "Подтверди управление",
-                "Автопилот сможет нажимать клавиши и мышь в активном окне игры.\n\n"
-                "Сначала сохранись, открой Satisfactory и оставайся рядом. Продолжить?",
+                confirmation_text,
                 icon="warning", parent=self.root,
             )
             if not confirmed:
@@ -376,6 +396,8 @@ class FicsitOpsApp:
         except OSError:
             pass
         worker_args = ["--live" if live else "--dry-run", "--max-steps", str(max_steps), "--goal", goal]
+        if self.watch_user_input_var.get():
+            worker_args.append("--watch-user-input")
         worker_args += ["--api-base", self.api_base_var.get().strip() or DEFAULT_API_BASE]
         worker_args += ["--model", self.model_var.get().strip() or DEFAULT_MODEL]
         if live:
@@ -401,7 +423,10 @@ class FicsitOpsApp:
             self.process = None
             return
 
-        self.status_var.set("Запущена проверка экрана…" if not live else "Live-режим включён — управление активно.")
+        status = "Запущена проверка экрана…" if not live else "Live-режим включён — управление активно."
+        if self.watch_user_input_var.get():
+            status += " Сбор клавиш/кликов активен только в игре."
+        self.status_var.set(status)
         self._set_status_color(self.GREEN if live else self.AMBER)
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")

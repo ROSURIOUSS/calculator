@@ -16,6 +16,7 @@ import re
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,7 @@ ALLOWED_KEYS = {
 
 SYSTEM_PROMPT = """You are a cautious screen-control agent for the single-player factory game Satisfactory.
 The player is already in an existing save. The user's mission is provided in each request.
-You see only the current screenshot and a short history; you have no game API and cannot inspect save files.
+You see only the current screenshot, a short action history, and optionally recent physical inputs from the player while Satisfactory was focused. You have no game API and cannot inspect save files. Treat player inputs as context, not as instructions to repeat blindly.
 
 Safety rules:
 - Never dismantle, delete, overwrite, or intentionally damage existing buildings or items.
@@ -83,6 +84,11 @@ def active_window_title() -> str:
         return ""
 
 
+def is_satisfactory_window_title(title: str) -> bool:
+    normalized = title.lower()
+    return "satisfactory" in normalized and "ficsit ops" not in normalized
+
+
 def ensure_game_focus(allow_any_window: bool) -> None:
     title = active_window_title()
     if allow_any_window:
@@ -90,7 +96,7 @@ def ensure_game_focus(allow_any_window: bool) -> None:
             raise RuntimeError("Не удалось определить активное окно. Открой игру и повтори запуск.")
         print(f"Активное окно: {title}")
         return
-    if "satisfactory" not in title.lower():
+    if not is_satisfactory_window_title(title):
         shown_title = title if title else "(название не определено)"
         raise RuntimeError(
             f"Активное окно — «{shown_title}», а не Satisfactory. "
@@ -155,6 +161,7 @@ def call_vision_model(
     goal: str,
     history: list[str],
     *,
+    user_inputs: list[str] | None = None,
     api_base: str,
     model: str,
     api_key: str | None,
@@ -162,10 +169,12 @@ def call_vision_model(
 ) -> dict[str, Any]:
     encoded = base64.b64encode(image_bytes).decode("ascii")
     history_text = "\n".join(f"- {line}" for line in history[-4:]) or "(пока нет)"
+    input_text = ", ".join(user_inputs) if user_inputs else "(нажатий не было/сбор выключен)"
     user_text = (
         f"МИССИЯ ПОЛЬЗОВАТЕЛЯ:\n{goal}\n\n"
         f"КРАТКАЯ ИСТОРИЯ:\n{history_text}\n\n"
-        "Оцени только то, что видно на текущем скриншоте. Выбери не более одного короткого, безопасного следующего действия. "
+        f"ПОСЛЕДНИЕ НАЖАТИЯ ИГРОКА В АКТИВНОМ ОКНЕ ИГРЫ (только контекст):\n{input_text}\n\n"
+        "Оцени только текущий скриншот и последние нажатия. Выбери не более одного короткого, безопасного следующего действия. "
         "Верни JSON по схеме из системного сообщения."
     )
     body = {
@@ -188,16 +197,40 @@ def call_vision_model(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    try:
-        response = requests.post(endpoint_url(api_base), headers=headers, json=body, timeout=timeout)
-        if response.status_code == 400 and "response_format" in body:
-            # Some otherwise compatible local servers do not implement the JSON response hint.
-            body.pop("response_format")
-            response = requests.post(endpoint_url(api_base), headers=headers, json=body, timeout=timeout)
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Не удалось обратиться к vision API ({api_base}). Проверь, запущена ли модель и верны ли настройки.\n{exc}"
-        ) from exc
+    def post_with_retry(payload: dict[str, Any]) -> requests.Response:
+        url = endpoint_url(api_base)
+        transient_statuses = {429, 500, 502, 503, 504}
+        last_exception: requests.RequestException | None = None
+        for attempt in range(3):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            except requests.RequestException as exc:
+                last_exception = exc
+                if attempt == 2:
+                    break
+                delay = 2 ** attempt
+                print(f"Сеть/API временно недоступны; повтор через {delay} с.")
+                time.sleep(delay)
+                continue
+            if response.status_code not in transient_statuses or attempt == 2:
+                return response
+            try:
+                delay = min(10.0, max(1.0, float(response.headers.get("Retry-After", 2 ** attempt))))
+            except (TypeError, ValueError):
+                delay = float(2 ** attempt)
+            print(f"Vision API временно перегружен (HTTP {response.status_code}); повтор через {delay:g} с.")
+            time.sleep(delay)
+        if last_exception is not None:
+            raise RuntimeError(
+                f"Не удалось обратиться к vision API ({api_base}) после повторов.\n{last_exception}"
+            ) from last_exception
+        raise RuntimeError("Vision API не ответил после повторных попыток.")
+
+    response = post_with_retry(body)
+    if response.status_code == 400 and "response_format" in body:
+        # Some otherwise compatible endpoints do not implement the JSON response hint.
+        body.pop("response_format")
+        response = post_with_retry(body)
     if response.status_code >= 400:
         detail = response.text[:800]
         raise RuntimeError(f"Vision API ответил HTTP {response.status_code}: {detail}")
@@ -252,20 +285,127 @@ def validate_action(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def stop_listener(stop_event: threading.Event) -> Any:
-    try:
-        from pynput import keyboard
-    except Exception as exc:  # pragma: no cover - machine-specific hook
-        raise RuntimeError(f"Не удалось включить аварийную клавишу F8/Esc: {exc}") from exc
+class GameInputCapture:
+    """Observe physical keyboard/mouse input only while Satisfactory is foreground."""
 
-    def on_press(key: Any) -> None:
-        if key in (keyboard.Key.f8, keyboard.Key.esc):
-            stop_event.set()
+    def __init__(
+        self,
+        stop_event: threading.Event,
+        *,
+        enabled: bool,
+        emergency_stop: bool,
+    ) -> None:
+        self.stop_event = stop_event
+        self.enabled = enabled
+        self.emergency_stop = emergency_stop
+        self.events: deque[str] = deque()
+        self.pressed: set[Any] = set()
+        self.lock = threading.Lock()
+        self.keyboard_listener: Any = None
+        self.mouse_listener: Any = None
+        try:
+            from pynput import keyboard, mouse
+        except Exception as exc:  # pragma: no cover - machine-specific hook
+            raise RuntimeError(f"Не удалось включить монитор клавиш/аварийную остановку: {exc}") from exc
+        self.keyboard = keyboard
+        self.mouse = mouse
 
-    listener = keyboard.Listener(on_press=on_press)
-    listener.daemon = True
-    listener.start()
-    return listener
+    def _target_is_active(self) -> bool:
+        return is_satisfactory_window_title(active_window_title())
+
+    def _key_label(self, key: Any) -> str:
+        special = {
+            self.keyboard.Key.space: "Space",
+            self.keyboard.Key.enter: "Enter",
+            self.keyboard.Key.esc: "Esc",
+            self.keyboard.Key.tab: "Tab",
+            self.keyboard.Key.shift: "Shift",
+            self.keyboard.Key.shift_l: "Left Shift",
+            self.keyboard.Key.shift_r: "Right Shift",
+            self.keyboard.Key.ctrl: "Ctrl",
+            self.keyboard.Key.ctrl_l: "Left Ctrl",
+            self.keyboard.Key.ctrl_r: "Right Ctrl",
+            self.keyboard.Key.alt: "Alt",
+            self.keyboard.Key.alt_l: "Left Alt",
+            self.keyboard.Key.alt_r: "Right Alt",
+            self.keyboard.Key.backspace: "Backspace",
+            self.keyboard.Key.delete: "Delete",
+            self.keyboard.Key.up: "Up",
+            self.keyboard.Key.down: "Down",
+            self.keyboard.Key.left: "Left",
+            self.keyboard.Key.right: "Right",
+            self.keyboard.Key.f8: "F8",
+        }
+        if key in special:
+            return special[key]
+        char = getattr(key, "char", None)
+        if char:
+            return char.upper()
+        return str(key).replace("Key.", "").upper()
+
+    def _record(self, label: str) -> None:
+        with self.lock:
+            self.events.append(label)
+
+    def _keyboard_event_filter(self, _message: Any, data: Any) -> bool:
+        # Ignore SendInput/PyAutoGUI-generated events so only physical player input is recorded.
+        return not bool(getattr(data, "flags", 0) & 0x12)  # LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED
+
+    def _mouse_event_filter(self, _message: Any, data: Any) -> bool:
+        return not bool(getattr(data, "flags", 0) & 0x03)  # LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED
+
+    def start(self) -> None:
+        keyboard_kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            keyboard_kwargs["win32_event_filter"] = self._keyboard_event_filter
+        self.keyboard_listener = self.keyboard.Listener(
+            on_press=self._on_press,
+            on_release=self._on_release,
+            **keyboard_kwargs,
+        )
+        self.keyboard_listener.daemon = True
+        self.keyboard_listener.start()
+        if self.enabled:
+            mouse_kwargs: dict[str, Any] = {}
+            if os.name == "nt":
+                mouse_kwargs["win32_event_filter"] = self._mouse_event_filter
+            self.mouse_listener = self.mouse.Listener(on_click=self._on_click, **mouse_kwargs)
+            self.mouse_listener.daemon = True
+            self.mouse_listener.start()
+
+    def _on_press(self, key: Any) -> None:
+        if self.emergency_stop and key in (self.keyboard.Key.f8, self.keyboard.Key.esc):
+            self.stop_event.set()
+            return
+        if not self.enabled or not self._target_is_active():
+            return
+        with self.lock:
+            if key in self.pressed:
+                return
+            self.pressed.add(key)
+        self._record(f"Key {self._key_label(key)}")
+
+    def _on_release(self, key: Any) -> None:
+        with self.lock:
+            self.pressed.discard(key)
+
+    def _on_click(self, _x: int, _y: int, button: Any, pressed: bool) -> None:
+        if pressed and self.enabled and self._target_is_active():
+            self._record(f"Mouse {getattr(button, 'name', str(button))}")
+
+    def drain(self) -> list[str]:
+        with self.lock:
+            events = list(self.events)
+            self.events.clear()
+        return events
+
+    def stop(self) -> None:
+        for listener in (self.keyboard_listener, self.mouse_listener):
+            if listener is not None:
+                try:
+                    listener.stop()
+                except Exception:
+                    pass
 
 
 def watch_stop_file(stop_event: threading.Event, stop_path: Path) -> None:
@@ -278,32 +418,180 @@ def watch_stop_file(stop_event: threading.Event, stop_path: Path) -> None:
             continue
 
 
-def perform_action(action: dict[str, Any], stop_event: threading.Event) -> None:
-    # PyAutoGUI's own failsafe is also enabled: move the mouse to the upper-left corner to abort.
+_WIN32_INPUT_CACHE: tuple[Any, ...] | None = None
+
+
+def _win32_input_api() -> tuple[Any, ...]:
+    global _WIN32_INPUT_CACHE
+    if _WIN32_INPUT_CACHE is not None:
+        return _WIN32_INPUT_CACHE
+    if os.name != "nt":
+        raise RuntimeError("Низкоуровневый игровой ввод доступен только в Windows.")
+
+    import ctypes
+    from ctypes import wintypes
+
+    pointer_size = ctypes.c_size_t
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG), ("dy", wintypes.LONG), ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", pointer_size),
+        ]
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD), ("wScan", wintypes.WORD), ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD), ("dwExtraInfo", pointer_size),
+        ]
+
+    class HARDWAREINPUT(ctypes.Structure):
+        _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD), ("wParamH", wintypes.WORD)]
+
+    class INPUTUNION(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _anonymous_ = ("union",)
+        _fields_ = [("type", wintypes.DWORD), ("union", INPUTUNION)]
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+    user32.SendInput.restype = wintypes.UINT
+    user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+    user32.MapVirtualKeyW.restype = wintypes.UINT
+    _WIN32_INPUT_CACHE = (ctypes, wintypes, user32, INPUT, KEYBDINPUT, MOUSEINPUT)
+    return _WIN32_INPUT_CACHE
+
+
+def _send_win32_inputs(inputs: list[Any]) -> None:
+    ctypes, _wintypes, user32, input_type, _key_type, _mouse_type = _win32_input_api()
+    array_type = input_type * len(inputs)
+    array = array_type(*inputs)
+    sent = user32.SendInput(len(inputs), array, ctypes.sizeof(input_type))
+    if sent != len(inputs):
+        error = ctypes.get_last_error()
+        detail = ctypes.FormatError(error).strip() if error else "Windows отклонила ввод"
+        raise RuntimeError(
+            f"Windows не передала ввод в игру ({detail}). Если Satisfactory запущена от администратора, "
+            "запусти FicsitOps на том же уровне прав."
+        )
+
+
+def _virtual_key_code(key: str) -> int:
+    named = {
+        "space": 0x20, "shift": 0xA0, "tab": 0x09,
+        "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
+    }
+    if key in named:
+        return named[key]
+    if len(key) == 1 and key.isalnum():
+        return ord(key.upper())
+    raise RuntimeError(f"Неизвестная Windows-клавиша: {key}")
+
+
+def _send_game_key(key: str, pressed: bool) -> None:
+    if os.name != "nt":
+        (pyautogui.keyDown if pressed else pyautogui.keyUp)(key)
+        return
+    ctypes, wintypes, user32, input_type, key_type, _mouse_type = _win32_input_api()
+    vk = _virtual_key_code(key)
+    scan = user32.MapVirtualKeyW(vk, 0)
+    if not scan:
+        raise RuntimeError(f"Не удалось определить scan code для клавиши {key}.")
+    flags = 0x0008  # KEYEVENTF_SCANCODE
+    if not pressed:
+        flags |= 0x0002  # KEYEVENTF_KEYUP
+    if key in {"left", "right", "up", "down"}:
+        flags |= 0x0001  # KEYEVENTF_EXTENDEDKEY
+    event = input_type()
+    event.type = 1  # INPUT_KEYBOARD
+    event.ki = key_type(0, scan, flags, 0, 0)
+    _send_win32_inputs([event])
+
+
+def _send_game_mouse_move(dx: int, dy: int) -> None:
+    if os.name != "nt":
+        pyautogui.moveRel(dx, dy, duration=0.1)
+        return
+    _ctypes, _wintypes, _user32, input_type, _key_type, mouse_type = _win32_input_api()
+    event = input_type()
+    event.type = 0  # INPUT_MOUSE
+    event.mi = mouse_type(dx, dy, 0, 0x0001, 0, 0)  # MOUSEEVENTF_MOVE, relative
+    _send_win32_inputs([event])
+
+
+def _send_game_click(button: str) -> None:
+    if os.name != "nt":
+        pyautogui.click(button=button)
+        return
+    down_up = {"left": (0x0002, 0x0004), "right": (0x0008, 0x0010)}[button]
+    _ctypes, _wintypes, _user32, input_type, _key_type, mouse_type = _win32_input_api()
+    events = []
+    for flags in down_up:
+        event = input_type()
+        event.type = 0
+        event.mi = mouse_type(0, 0, 0, flags, 0, 0)
+        events.append(event)
+    _send_win32_inputs(events)
+
+
+def _check_mouse_failsafe() -> None:
+    try:
+        x, y = pyautogui.position()
+    except pyautogui.FailSafeException:
+        raise
+    except Exception:
+        return
+    if x <= 1 and y <= 1:
+        raise pyautogui.FailSafeException("Cursor reached the upper-left corner.")
+
+
+def _ensure_action_window_active(allow_any_window: bool) -> None:
+    title = active_window_title()
+    if allow_any_window and title:
+        return
+    if not allow_any_window and is_satisfactory_window_title(title):
+        return
+    shown_title = title or "(название не определено)"
+    raise RuntimeError(f"Игровое окно потеряло фокус (активно: «{shown_title}»); действие отменено.")
+
+
+def perform_action(
+    action: dict[str, Any],
+    stop_event: threading.Event,
+    allow_any_window: bool = False,
+) -> None:
     keys = action["keys"]
     pressed: list[str] = []
     try:
         for key in keys:
             if stop_event.is_set():
                 return
-            pyautogui.keyDown(key)
+            _ensure_action_window_active(allow_any_window)
+            _check_mouse_failsafe()
+            _send_game_key(key, True)
             pressed.append(key)
         if action["mouse_dx"] or action["mouse_dy"]:
-            move_duration = min(max(action["hold_seconds"], 0.08), 0.25)
-            pyautogui.moveRel(action["mouse_dx"], action["mouse_dy"], duration=move_duration)
-        remaining = max(0, action["hold_seconds"] - (0.25 if action["mouse_dx"] or action["mouse_dy"] else 0))
-        deadline = time.monotonic() + remaining
-        while remaining > 0 and not stop_event.is_set():
-            time.sleep(min(0.05, remaining))
-            remaining = deadline - time.monotonic()
+            _ensure_action_window_active(allow_any_window)
+            _check_mouse_failsafe()
+            _send_game_mouse_move(action["mouse_dx"], action["mouse_dy"])
+        hold_seconds = max(action["hold_seconds"], 0.08 if keys else 0.0)
+        deadline = time.monotonic() + hold_seconds
+        while time.monotonic() < deadline and not stop_event.is_set():
+            _ensure_action_window_active(allow_any_window)
+            _check_mouse_failsafe()
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
     finally:
         for key in reversed(pressed):
             try:
-                pyautogui.keyUp(key)
+                _send_game_key(key, False)
             except Exception:
                 pass
     if not stop_event.is_set() and action["click"] != "none":
-        pyautogui.click(button=action["click"])
+        _ensure_action_window_active(allow_any_window)
+        _check_mouse_failsafe()
+        _send_game_click(action["click"])
 
 
 def parse_args() -> argparse.Namespace:
@@ -312,6 +600,7 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--live", action="store_true", help="разрешить ограниченные нажатия клавиш/мыши после подтверждения")
     mode.add_argument("--dry-run", action="store_true", help="только анализировать экран, не отправляя игровые действия (режим по умолчанию)")
     parser.add_argument("--confirmed-live", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--watch-user-input", action="store_true", help="передавать модели последние нажатия клавиш/клики игрока в окне игры")
     parser.add_argument("--max-steps", type=int, default=10, help="максимальное число циклов (1–500, по умолчанию 10)")
     parser.add_argument("--monitor", type=int, default=1, help="номер монитора для скриншотов, начиная с 1")
     parser.add_argument("--goal", type=str, default=None, help="переопределить миссию из pilot/goal.txt")
@@ -364,6 +653,8 @@ def main() -> int:
 
     print(f"Режим: {'LIVE' if live else 'DRY-RUN'} | модель: {args.model} | максимум шагов: {args.max_steps}")
     print(f"API: {args.api_base} | миссия: {goal}")
+    if args.watch_user_input:
+        print("Сбор включён: события клавиш и кликов передаются vision-модели только при активном окне Satisfactory.")
     print("Агент не управляет игрой вне активного окна. Для отмены в консоли нажми Ctrl+C.\n")
 
     stop_event = threading.Event()
@@ -371,12 +662,19 @@ def main() -> int:
     if stop_file:
         stop_watcher = threading.Thread(target=watch_stop_file, args=(stop_event, Path(stop_file)), daemon=True)
         stop_watcher.start()
-    listener = None
-    if live:
+    input_capture: GameInputCapture | None = None
+    if live or args.watch_user_input:
         try:
-            listener = stop_listener(stop_event)
-        except RuntimeError as exc:
-            print(f"ОШИБКА: {exc}", file=sys.stderr)
+            input_capture = GameInputCapture(
+                stop_event,
+                enabled=args.watch_user_input,
+                emergency_stop=live,
+            )
+            input_capture.start()
+        except Exception as exc:
+            if input_capture is not None:
+                input_capture.stop()
+            print(f"ОШИБКА: не удалось включить монитор ввода/аварийную остановку: {exc}", file=sys.stderr)
             return 2
 
     history: list[str] = []
@@ -388,10 +686,14 @@ def main() -> int:
             try:
                 ensure_game_focus(args.allow_any_window)
                 screenshot = capture_screen(args.monitor)
+                user_inputs = input_capture.drain() if input_capture and args.watch_user_input else []
+                if user_inputs:
+                    print(f"  Контекст игрока: модели передаётся {len(user_inputs)} событий клавиатуры/мыши.")
                 decision_raw = call_vision_model(
                     screenshot,
                     goal,
                     history,
+                    user_inputs=user_inputs,
                     api_base=args.api_base,
                     model=args.model,
                     api_key=os.getenv("VISION_API_KEY"),
@@ -430,7 +732,14 @@ def main() -> int:
                 # Re-check foreground immediately before injecting input.
                 try:
                     ensure_game_focus(args.allow_any_window)
-                    perform_action(decision, stop_event)
+                    perform_action(decision, stop_event, args.allow_any_window)
+                    if not stop_event.is_set() and (
+                        decision["keys"] or decision["mouse_dx"] or decision["mouse_dy"] or decision["click"] != "none"
+                    ):
+                        backend = "Windows SendInput" if os.name == "nt" else "PyAutoGUI"
+                        print(f"  Ввод отправлен через {backend}.")
+                    elif not stop_event.is_set():
+                        print("  Игровой ввод не запрошен моделью.")
                 except pyautogui.FailSafeException:
                     print("Аварийная остановка PyAutoGUI: курсор в левом верхнем углу.")
                     break
@@ -445,11 +754,8 @@ def main() -> int:
     except KeyboardInterrupt:
         print("Остановка: Ctrl+C.")
     finally:
-        if listener is not None:
-            try:
-                listener.stop()
-            except Exception:
-                pass
+        if input_capture is not None:
+            input_capture.stop()
     print("Автопилот завершил работу.")
     return 0
 
