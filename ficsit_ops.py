@@ -154,8 +154,9 @@ class FicsitOpsApp:
         self.api_key_var = tk.StringVar()
         self._field(settings, "API endpoint", self.api_base_var, row=1, column=0, width=50)
         self._field(settings, "Модель", self.model_var, row=1, column=1, width=26)
-        self._field(settings, "API key (необязательно)", self.api_key_var, row=2, column=0, width=50, show="•")
-        ttk.Label(settings, text="Ollama по умолчанию работает локально. При удалённом API скриншоты передаются его провайдеру.", style="PanelMuted.TLabel").grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self._field(settings, "API key (необязательно)", self.api_key_var, row=2, column=0, width=50, show="•", allow_copy=False, paste_button=True)
+        ttk.Label(settings, text="Вставка: Ctrl+V или кнопка «Вставить». API key не сохраняется в настройках.", style="PanelMuted.TLabel").grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 3))
+        ttk.Label(settings, text="Для Gemini нужны ключ из AI Studio и точный API model ID; «Авто / Gemini 3 models» — не ID модели. Удалённый API получит скриншоты игры.", style="PanelMuted.TLabel", wraplength=740).grid(row=4, column=0, columnspan=2, sticky="w")
         settings.columnconfigure(0, weight=3)
         settings.columnconfigure(1, weight=2)
 
@@ -173,6 +174,7 @@ class FicsitOpsApp:
         )
         self.goal_text.pack(fill="x", pady=(9, 0))
         self.form_widgets.append(self.goal_text)
+        self._attach_clipboard(self.goal_text, allow_copy=True)
 
         options = self._panel(outer)
         ttk.Label(options, text="РЕЖИМ РАБОТЫ", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 9))
@@ -232,13 +234,91 @@ class FicsitOpsApp:
         log_scroll.pack(side="right", fill="y")
         ttk.Label(outer, text="F8 / Esc останавливают автопилот. В live-режиме оставайся рядом с компьютером.", style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
 
-    def _field(self, parent: ttk.Frame, label: str, variable: tk.StringVar, *, row: int, column: int, width: int, show: str | None = None) -> None:
+    def _field(self, parent: ttk.Frame, label: str, variable: tk.StringVar, *, row: int, column: int, width: int, show: str | None = None, allow_copy: bool = True, paste_button: bool = False) -> None:
         frame = ttk.Frame(parent, style="Panel.TFrame")
         frame.grid(row=row, column=column, sticky="ew", padx=(0 if column == 0 else 10, 0), pady=(0, 8))
         ttk.Label(frame, text=label, style="PanelMuted.TLabel").pack(anchor="w", pady=(0, 5))
-        entry = ttk.Entry(frame, textvariable=variable, width=width, show=show or "")
-        entry.pack(fill="x")
+        entry_row = ttk.Frame(frame, style="Panel.TFrame")
+        entry_row.pack(fill="x")
+        entry = ttk.Entry(entry_row, textvariable=variable, width=width, show=show or "")
+        entry.pack(side="left", fill="x", expand=True)
+        if paste_button:
+            ttk.Button(entry_row, text="Вставить", command=lambda: self._paste_clipboard(entry)).pack(side="left", padx=(6, 0))
         self.form_widgets.append(entry)
+        self._attach_clipboard(entry, allow_copy=allow_copy)
+
+    def _attach_clipboard(self, widget: tk.Widget, *, allow_copy: bool = True) -> None:
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Вставить", command=lambda: self._paste_clipboard(widget))
+        if allow_copy:
+            menu.add_command(label="Копировать", command=lambda: self._copy_clipboard(widget))
+        menu.add_command(label="Выделить всё", command=lambda: self._select_all(widget))
+
+        def show_menu(event: tk.Event) -> str:
+            widget.focus_set()
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return "break"
+
+        def paste_key(event: tk.Event) -> str:
+            self._paste_clipboard(widget)
+            return "break"
+
+        widget.bind("<Button-3>", show_menu, add="+")
+        widget.bind("<Control-v>", paste_key, add="+")
+        widget.bind("<Control-V>", paste_key, add="+")
+        widget.bind("<Shift-Insert>", paste_key, add="+")
+        if not allow_copy:
+            widget.bind("<Control-c>", lambda _event: "break", add="+")
+            widget.bind("<Control-C>", lambda _event: "break", add="+")
+
+    def _paste_clipboard(self, widget: tk.Widget) -> None:
+        try:
+            text = widget.clipboard_get()
+        except tk.TclError:
+            self.status_var.set("Буфер обмена пуст или недоступен.")
+            return
+        if isinstance(widget, tk.Text):
+            if widget.cget("state") == "disabled":
+                return
+            try:
+                widget.delete("sel.first", "sel.last")
+            except tk.TclError:
+                pass
+            widget.insert("insert", text)
+        else:
+            try:
+                if widget.cget("state") in {"disabled", "readonly"}:
+                    return
+            except tk.TclError:
+                pass
+            try:
+                widget.delete("sel.first", "sel.last")
+            except tk.TclError:
+                pass
+            widget.insert("insert", text.replace("\r", "").replace("\n", ""))
+        widget.focus_set()
+
+    def _copy_clipboard(self, widget: tk.Widget) -> None:
+        try:
+            if isinstance(widget, tk.Text):
+                text = widget.get("sel.first", "sel.last")
+            else:
+                text = widget.selection_get()
+        except tk.TclError:
+            return
+        widget.clipboard_clear()
+        widget.clipboard_append(text)
+
+    def _select_all(self, widget: tk.Widget) -> None:
+        widget.focus_set()
+        if isinstance(widget, tk.Text):
+            widget.tag_add("sel", "1.0", "end-1c")
+        else:
+            widget.selection_range(0, "end")
+            widget.icursor("end")
 
     def _load_form_values(self) -> None:
         default_goal_path = resource_path("pilot/goal.txt")
