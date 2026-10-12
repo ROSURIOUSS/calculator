@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101513">
+  <meta name="description" content="Локальный помощник по производственным цепочкам Satisfactory и экспериментальный игровой автопилот.">
+  <title>FICSIT Ops — помощник по Satisfactory</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#planner" aria-label="FICSIT Ops — главная">
+        <span class="brand-mark">F</span>
+        <span class="brand-type"><strong>FICSIT</strong><small>OPS CONSOLE</small></span>
+      </a>
+
+      <div class="side-caption">РАБОЧАЯ ОБЛАСТЬ</div>
+      <nav class="side-nav" aria-label="Разделы приложения">
+        <button class="nav-item active" type="button" data-view="planner" aria-current="page">
+          <span class="nav-icon">▦</span><span>План производства</span><span class="nav-chevron">›</span>
+        </button>
+        <button class="nav-item" type="button" data-view="pilot">
+          <span class="nav-icon nav-icon-pilot">⌁</span><span>Игровой автопилот</span><span class="nav-chevron">›</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-status">
+        <span class="status-dot"></span>
+        <div><strong>Локальный режим</strong><small>данные остаются у тебя</small></div>
+      </div>
+      <div class="sidebar-foot">FICSIT OPS <span>•</span> ПРОТОТИП</div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="breadcrumb"><span>КОНСОЛЬ</span><b>/</b><strong id="current-section">ПЛАН ПРОИЗВОДСТВА</strong></div>
+        <div class="topbar-right">
+          <span class="version-pill"><span class="version-dot"></span> BUILD 0.1</span>
+          <span class="topbar-divider"></span>
+          <span class="operator-label"><span class="operator-avatar">F</span> ОПЕРАТОР</span>
+        </div>
+      </header>
+
+      <section id="view-planner" class="view active" aria-labelledby="planner-title">
+        <div class="hero">
+          <div class="hero-copy">
+            <div class="eyebrow"><span class="eyebrow-line"></span> ПРОИЗВОДСТВЕННЫЙ ЦЕНТР <span class="eyebrow-tag">01 / 02</span></div>
+            <h1 id="planner-title">Собери план.<br><span>Запусти производство.</span></h1>
+            <p>Укажи цель — консоль разложит её на рецепты, машины и сырьё. Без ручной арифметики и догадок.</p>
+            <div class="hero-meta"><span class="hero-meta-icon">◷</span> БАЗОВЫЕ РЕЦЕПТЫ • РАСЧЁТ В МИНУТУ</div>
+          </div>
+          <div class="hero-art" aria-hidden="true">
+            <div class="art-orbit orbit-one"></div>
+            <div class="art-orbit orbit-two"></div>
+            <div class="art-core"><span>F</span></div>
+            <div class="art-cross cross-one">+</div><div class="art-cross cross-two">+</div>
+            <div class="art-tag tag-top">RATE / MIN</div>
+            <div class="art-tag tag-bottom">PRODUCTION ONLINE</div>
+            <div class="art-spark spark-one"></div><div class="art-spark spark-two"></div><div class="art-spark spark-three"></div>
+          </div>
+        </div>
+
+        <div class="section-heading">
+          <div><span class="section-index">01</span><h2>Параметры плана</h2></div>
+          <span class="section-note">НАСТРОЙ ЦЕЛЕВОЙ ПРОДУКТ</span>
+        </div>
+
+        <div class="planner-grid">
+          <section class="panel setup-panel" aria-label="Параметры производства">
+            <div class="panel-topline"><span class="panel-label">ВХОДНЫЕ ДАННЫЕ</span><span class="panel-number">01 — 03</span></div>
+            <label class="field-label" for="product-search">Что производим?</label>
+            <div class="search-wrap">
+              <span class="search-icon" aria-hidden="true">⌕</span>
+              <input id="product-search" type="search" placeholder="Найти продукт: мотор, плита…" autocomplete="off" aria-label="Поиск продукта">
+            </div>
+            <div class="select-wrap product-select-wrap">
+              <span class="field-icon">◇</span>
+              <select id="product-select" aria-label="Целевой продукт"></select>
+              <span class="select-arrow">⌄</span>
+            </div>
+            <div id="product-search-status" class="search-status" aria-live="polite"></div>
+            <div class="field-row-label">
+              <label class="field-label" for="rate-input">Сколько производить?</label>
+              <span class="field-unit">ЕД. / МИН</span>
+            </div>
+            <div class="rate-control">
+              <button id="rate-down" class="step-button" type="button" aria-label="Уменьшить выпуск">−</button>
+              <input id="rate-input" type="text" maxlength="10" value="10" inputmode="decimal" autocomplete="off" aria-label="Целевой выпуск в минуту">
+              <button id="rate-up" class="step-button" type="button" aria-label="Увеличить выпуск">+</button>
+            </div>
+            <div class="quick-rates" aria-label="Быстрые значения выпуска">
+              <span>Быстрый выбор</span>
+              <div><button type="button" class="rate-chip" data-rate="1">1</button><button type="button" class="rate-chip" data-rate="5">5</button><button type="button" class="rate-chip" data-rate="10">10</button><button type="button" class="rate-chip" data-rate="20">20</button><button type="button" class="rate-chip" data-rate="60">60</button></div>
+            </div>
+            <div id="recipe-select-group" class="recipe-select-group">
+              <label class="field-label recipe-label" for="recipe-select">Рецепт цели</label>
+              <div class="select-wrap select-wrap-secondary">
+                <span class="field-icon">⌘</span>
+                <select id="recipe-select" aria-label="Рецепт целевого продукта"></select>
+                <span class="select-arrow">⌄</span>
+              </div>
+            </div>
+            <div id="recipe-hint" class="recipe-hint"></div>
+            <button id="calculate-button" class="primary-button" type="button"><span>Пересчитать производство</span><b>↗</b></button>
+            <div class="panel-footnote"><span>i</span> План обновляется при изменении параметров. Скорость машин можно точно настроить (underclock).</div>
+          </section>
+
+          <section class="panel result-panel" aria-label="Итоговый план производства">
+            <div class="panel-topline"><span class="panel-label">СВОДКА ПРОИЗВОДСТВА</span><span id="result-status" class="live-label"><i></i> ГОТОВО К РАСЧЁТУ</span></div>
+            <div class="result-heading">
+              <div><span class="result-overline">ЦЕЛЬ</span><h3 id="result-product">—</h3></div>
+              <div class="target-rate"><strong id="result-rate">—</strong><span>ЕД. / МИН</span></div>
+            </div>
+            <div class="metric-grid">
+              <div class="metric-card"><span class="metric-label">МАШИНЫ</span><strong id="metric-machines">—</strong><small id="metric-machines-note">к постройке</small></div>
+              <div class="metric-card"><span class="metric-label">МОЩНОСТЬ</span><strong id="metric-power">—</strong><small>МВт, оценка</small></div>
+              <div class="metric-card"><span class="metric-label">ВИДОВ СЫРЬЯ</span><strong id="metric-resources">—</strong><small>входящих ресурсов</small></div>
+            </div>
+            <div class="result-footer"><span class="footer-check">✓</span><span id="result-footer-text">Задай цель, чтобы сформировать цепочку производства.</span><button id="copy-plan-button" class="copy-plan-button" type="button" disabled>В миссию автопилота ↗</button></div>
+          </section>
+        </div>
+
+        <div class="detail-grid">
+          <section class="panel detail-panel">
+            <div class="detail-heading"><div><span class="section-index small-index">02</span><h2>Машинный парк</h2></div><span id="machine-count-badge" class="count-badge">0 МАШИН</span></div>
+            <div id="machines-list" class="machines-list empty-state"><div class="empty-mark">⌁</div><p>После расчёта здесь появятся станки и их загрузка.</p></div>
+            <div class="list-legend"><span><i class="legend-dot building-dot"></i> зданий</span><span><i class="legend-dot clock-dot"></i> скорость</span><span><i class="legend-dot power-dot"></i> мощность</span></div>
+          </section>
+          <section class="panel detail-panel resource-panel">
+            <div class="detail-heading"><div><span class="section-index small-index">03</span><h2>Потребность в сырье</h2></div><span class="count-badge count-badge-muted">В МИНУТУ</span></div>
+            <div id="resources-list" class="resources-list empty-state"><div class="empty-mark">◈</div><p>Сырьевые потоки появятся после расчёта.</p></div>
+            <div class="resource-note"><span>!</span> Добывающие машины, вода, электрогенерация и побочные продукты в оценку не включены.</div>
+          </section>
+        </div>
+
+        <section class="panel flow-panel">
+          <div class="detail-heading"><div><span class="section-index small-index">04</span><h2>Цепочка производства</h2></div><span class="flow-caption"><span class="flow-line"></span> СЫРЬЁ → ГОТОВЫЙ ПРОДУКТ</span></div>
+          <div id="flow-list" class="flow-list empty-flow"><span class="flow-placeholder">Выбери продукт и рассчитай план, чтобы увидеть всю цепочку.</span></div>
+        </section>
+        <footer class="page-footer"><span>РЕЦЕПТЫ: БАЗОВЫЕ • ДАННЫЕ МОЖНО ДОПОЛНЯТЬ В <code>app.js</code></span><span>НЕОФИЦИАЛЬНЫЙ ПОМОЩНИК ДЛЯ Satisfactory</span></footer>
+      </section>
+
+      <section id="view-pilot" class="view" aria-labelledby="pilot-title" hidden>
+        <div class="pilot-hero">
+          <div>
+            <div class="eyebrow"><span class="eyebrow-line"></span> ЭКСПЕРИМЕНТАЛЬНЫЙ РЕЖИМ <span class="eyebrow-tag">02 / 02</span></div>
+            <h1 id="pilot-title">Автопилот<br><span>для открытого мира.</span></h1>
+            <p>Локальный компьютерный агент смотрит на экран Satisfactory и нажимает клавиши от твоего имени. Он запускается на твоём Windows-ПК, не в этой веб-странице.</p>
+          </div>
+          <div class="pilot-status-card"><span class="status-ring"><i></i></span><span class="status-card-label">СОСТОЯНИЕ АГЕНТА</span><strong>НЕ ЗАПУЩЕН</strong><small>Запуск — вручную на ПК</small></div>
+        </div>
+
+        <div class="safety-banner"><span class="safety-icon">!</span><div><strong>Это исследовательский прототип, а не готовый автономный игрок.</strong><p>Модель может ошибиться, потратить ресурсы или увести персонажа в опасное место. Сначала проверь режим наблюдения. Не запускай во время важных игровых сессий и не оставляй агента без присмотра.</p></div></div>
+
+        <div class="section-heading pilot-section-heading"><div><span class="section-index">01</span><h2>Подключи зрение</h2></div><span class="section-note">WINDOWS • УЖЕ ОТКРЫТОЕ СОХРАНЕНИЕ</span></div>
+        <div class="setup-steps">
+          <article class="setup-step"><div class="step-top"><span class="step-no">01</span><span class="step-tag">МОДЕЛЬ</span></div><h3>Нужна vision-модель</h3><p>Например, локальный Ollama с vision-моделью. Агент отправляет ей только скриншоты игры для выбора следующего короткого действия.</p><code>ollama pull qwen2.5vl:7b</code></article>
+          <article class="setup-step"><div class="step-top"><span class="step-no">02</span><span class="step-tag">СБОРКА</span></div><h3>Собери Windows-программу</h3><p>На Windows запусти build_windows.bat. Готовое приложение появится в папке dist; после сборки Python для запуска не нужен.</p><div class="copy-line"><code>build_windows.bat</code><button class="copy-button" data-copy="build_windows.bat" type="button" aria-label="Копировать имя сборочного файла">⧉</button></div></article>
+          <article class="setup-step"><div class="step-top"><span class="step-no">03</span><span class="step-tag">ПРОВЕРКА</span></div><h3>Сначала режим проверки</h3><p>Открой FicsitOps.exe, загрузи сохранение и выбери проверку экрана. В этом режиме программа анализирует скриншоты, но не нажимает клавиши.</p><div class="copy-line"><code>dist/FicsitOps.exe</code><button class="copy-button" data-copy="dist/FicsitOps.exe" type="button" aria-label="Копировать путь к приложению">⧉</button></div></article>
+          <article class="setup-step step-live"><div class="step-top"><span class="step-no">04</span><span class="step-tag">УПРАВЛЕНИЕ</span></div><h3>Разреши управление</h3><p>После проверки выбери управление мышью и клавиатурой, подтверди предупреждение в окне и оставайся рядом. Остановить можно кнопкой, F8 или Esc.</p><div class="copy-line"><code>Только после dry-run</code></div></article>
+        </div>
+
+        <div class="section-heading pilot-section-heading"><div><span class="section-index">02</span><h2>Границы управления</h2></div><span class="section-note">СНАЧАЛА БЕЗОПАСНОСТЬ</span></div>
+        <div class="pilot-limits">
+          <div class="limit-item"><span class="limit-icon">⌨</span><div><strong>Только открытое окно игры</strong><p>Агент не запускает игру, не читает и не меняет файлы сохранений.</p></div></div>
+          <div class="limit-item"><span class="limit-icon">⏱</span><div><strong>Короткие действия</strong><p>Каждый шаг ограничен по времени; есть лимит шагов и ручная остановка.</p></div></div>
+          <div class="limit-item"><span class="limit-icon">◉</span><div><strong>Vision-модель — отдельная</strong><p>Для Ollama данные остаются на этом ПК. Другой API может отправлять скриншоты своему провайдеру.</p></div></div>
+          <div class="limit-item"><span class="limit-icon">△</span><div><strong>Ограниченная надёжность</strong><p>Это цикл «скриншот → решение → ввод», а не полноценная игровая ИИ-система с гарантированным прохождением.</p></div></div>
+        </div>
+        <div class="pilot-note"><span>i</span><p>Кнопка «В миссию автопилота» копирует текущий расчёт — вставь его в <code>pilot/goal.txt</code>, если хочешь, чтобы агент ориентировался на план. По умолчанию агент бережно осматривает сохранение и просит вмешаться при неясной ситуации.</p></div>
+        <footer class="page-footer"><span>АВТОПИЛОТ: ВНЕШНЯЯ WINDOWS-ПРОГРАММА • ВЕРСИЯ 0.1</span><span>ЗАПУСКАЕТСЯ И ОСТАНАВЛИВАЕТСЯ ТОЛЬКО ПОЛЬЗОВАТЕЛЕМ</span></footer>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
