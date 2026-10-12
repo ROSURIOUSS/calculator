@@ -21,3 +21,17 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+
+# Python environment and local agent artifacts
+.venv/
+.build-venv/
+__pycache__/
+*.py[cod]
+.env
+screenshots/
+
+# Packaged desktop app
+/build/
+/dist/
+*.spec
+/FicsitOps-Windows-Source.zip
